@@ -1,0 +1,46 @@
+
+USE ROLE ETL_TASK_ROLE;
+USE WAREHOUSE DCM_DEMO_WH;
+
+
+-- 検証用データの挿入
+
+INSERT INTO DCM_TEST01_DEV.PL_DEMO01.ORDERS_BRONZE(
+    ORDER_ID,
+    CUSTOMER_NAME,
+    AMOUNT,
+    ORDER_DATE,
+    AUDIT__INGEST_TIMESTAMP
+)
+VALUES
+    (
+        '9001',
+        'OLD_CUSTOMER',
+        '100',
+        '2026-01-01',
+        DATEADD(
+            DAY,
+            -61,
+            CURRENT_TIMESTAMP()
+        )
+    ),
+    (
+        '9002',
+        'NEW_CUSTOMER',
+        '200',
+        '2026-10-04',
+        DATEADD(
+            DAY,
+            -59,
+            CURRENT_TIMESTAMP()
+        )
+    );
+
+SELECT * FROM DCM_TEST01_DEV.PL_DEMO01.ORDERS_BRONZE;
+
+CALL DCM_TEST01_DEV.PROCEDURES.SP_DELETE_OLD_ORDERS_v1(
+    P_TARGET_TABLE => 'DCM_TEST01_DEV.PL_DEMO01.ORDERS_BRONZE',
+    RETENTION_DAYS => 60
+);
+
+SELECT * FROM DCM_TEST01_DEV.PL_DEMO01.ORDERS_BRONZE;

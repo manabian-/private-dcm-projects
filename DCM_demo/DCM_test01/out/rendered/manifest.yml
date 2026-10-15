@@ -1,0 +1,26 @@
+manifest_version: 2
+type: DCM_PROJECT
+
+default_target: DEV
+
+targets:
+  DEV:
+    account_identifier: RZMTETA-YU93189
+    project_name: DCM_ADMIN.PROJECTS.DCM_TEST01
+    project_owner: DCM_PROJECT_OWNER
+    templating_config: DEV
+
+templating:
+  defaults:
+    project_owner_role: "DCM_PROJECT_OWNER"
+    wh_size: "XSMALL"
+
+  configurations:
+    DEV:
+      env_suffix: "_DEV"
+      database: "DCM_TEST01_DEV"
+      warehouse: "DCM_DEMO_WH"
+    PRD:
+      env_suffix: "_PRD"
+      database: "DCM_TEST01_PRD"
+      warehouse: "DCM_DEMO_WH_PRD"
