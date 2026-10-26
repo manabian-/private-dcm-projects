@@ -17,6 +17,7 @@
 
 
 
+
 -- Orders の Bronze / Silver、Stream、Task Graph をこのファイルで管理する。
 -- SQL ファイルの並び順はデプロイ順序ではない。
 
@@ -32,7 +33,12 @@ DEFINE STAGE DCM_TEST01_DEV.PL_DEMO01.SOURCE_STAGE
 DEFINE STAGE DCM_TEST01_DEV.PL_DEMO01.OUTPUT_STAGE
     URL = 'azure://adlszealast01.blob.core.windows.net/snowpipe-test/inbound/PL_demo01'
     STORAGE_INTEGRATION = SI_INBOUND;
-    
+
+-- databricks 起動用ファイル出力先ADLSパス
+DEFINE STAGE DCM_TEST01_DEV.PL_DEMO01.JOB_TRIGGER_STAGE
+    URL = 'azure://adlszealast01.blob.core.windows.net/snowpipe-test/inbound/databricks-trigger/'
+    STORAGE_INTEGRATION = SI_INBOUND;
+
 -- Bronze: 原文の文字列を保持し、COPY のメタデータを監査列に記録する。
 DEFINE TABLE DCM_TEST01_DEV.PL_DEMO01.ORDERS_BRONZE (
     ORDER_ID VARCHAR,
@@ -72,7 +78,7 @@ DECLARE
     copy_result VARCHAR;
     check_result VARCHAR;
 BEGIN
-    CALL DCM_TEST01_DEV.PROCEDURES.SP_COPY(
+    CALL DCM_TEST01_DEV.PROCEDURES.SP_COPY_v1(
         P_TARGET_TABLE => 'DCM_TEST01_DEV.PL_DEMO01.ORDERS_BRONZE',
         -- ファイル移動を行わないのでsource stageを読み取る
         P_SOURCE_STAGE => 'DCM_TEST01_DEV.PL_DEMO01.SOURCE_STAGE',
@@ -96,7 +102,7 @@ BEGIN
     CALL SYSTEM$SET_RETURN_VALUE(:copy_result);
 
     -- ファイル単位の失敗と COPY SQL 自体の失敗のどちらも後続を停止する。
-    CALL DCM_TEST01_DEV.PROCEDURES.SP_CHECK_COPY_RESULT(
+    CALL DCM_TEST01_DEV.PROCEDURES.SP_CHECK_COPY_RESULT_v1(
         :copy_result, TRUE, TRUE
     ) INTO :check_result;
 
@@ -112,7 +118,7 @@ DECLARE
     merge_result VARIANT;
     return_value VARCHAR;
 BEGIN
-    CALL DCM_TEST01_DEV.PROCEDURES.SP_UPSERT_BRONZE_TO_SILVER(
+    CALL DCM_TEST01_DEV.PROCEDURES.SP_UPSERT_BRONZE_TO_SILVER_v1(
         P_TARGET_TABLE => 'DCM_TEST01_DEV.PL_DEMO01.ORDERS',
         P_SOURCE_SQL => $$
             SELECT
@@ -144,7 +150,7 @@ DECLARE
 BEGIN
     -- Silver の MERGE が成功した後に Bronze だけを削除する。
     IF (60 > 0) THEN
-        CALL DCM_TEST01_DEV.PROCEDURES.SP_DELETE_OLD_ORDERS(
+        CALL DCM_TEST01_DEV.PROCEDURES.SP_DELETE_OLD_ORDERS_v1(
             P_TARGET_TABLE => 'DCM_TEST01_DEV.PL_DEMO01.ORDERS_BRONZE',
             RETENTION_DAYS => 60
         ) INTO :delete_result;
@@ -163,7 +169,7 @@ AS
 DECLARE
     unload_query_id VARCHAR;
 BEGIN
-    CALL DCM_TEST01_DEV.PROCEDURES.SP_UNLOAD_FROM_STREAM(
+    CALL DCM_TEST01_DEV.PROCEDURES.SP_UNLOAD_v1(
         P_TARGET_STAGE => 'DCM_TEST01_DEV.PL_DEMO01.OUTPUT_STAGE',
         P_TARGET_PATH => 'output/',
         P_SOURCE_QUERY => $$
@@ -193,5 +199,27 @@ BEGIN
         P_DETAILED_OUTPUT => TRUE
     ) INTO :unload_query_id;
 
-    CALL SYSTEM$SET_RETURN_VALUE(:unload_query_id);
+    CALL SYSTEM$SET_RETURN_VALUE(:unload_query_id);    
+END;
+
+DEFINE TASK DCM_TEST01_DEV.PL_DEMO01.TASK_PUT_DATABRICKS_TRIGGER
+    WAREHOUSE = 'DCM_DEMO_WH'
+    TIMEZONE = 'UTC', AUTOCOMMIT = TRUE
+    AFTER DCM_TEST01_DEV.PL_DEMO01.TASK_UNLOAD_ORDERS_CDC
+    STARTED
+AS
+DECLARE
+    trigger_result VARIANT;
+    return_value VARCHAR;
+BEGIN
+
+    CALL DCM_TEST01_DEV.PROCEDURES.SP_PUT_DATABRICKS_TRIGGER_V1(
+        P_TARGET_STAGE => 'DCM_TEST01_DEV.PL_DEMO01.JOB_TRIGGER_STAGE',
+        P_TARGET_PATH  => 'job_a'
+    ) INTO :trigger_result;
+
+    return_value := TO_JSON(:trigger_result);
+
+    CALL SYSTEM$SET_RETURN_VALUE(:return_value);
+
 END;

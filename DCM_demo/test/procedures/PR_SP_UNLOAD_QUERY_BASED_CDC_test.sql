@@ -1,0 +1,277 @@
+USE ROLE DCM_PROJECT_OWNER;
+USE WAREHOUSE DCM_DEMO_WH;
+
+-- テスト用database/schemaの作成
+-- CREATE OR REPLACE DATABASE DCM_TEST01_DEV;
+CREATE OR REPLACE SCHEMA DCM_TEST01_DEV.TEST_SCHEMA;
+
+USE DATABASE DCM_TEST01_DEV;
+USE SCHEMA TEST_SCHEMA;
+
+
+-- タイムゾーン設定
+ALTER SESSION SET TIMEZONE = 'UTC';
+
+-- テスト用テーブルの作成
+CREATE OR REPLACE TABLE ORDERS (
+    ORDER_ID                  NUMBER,
+    CUSTOMER_NAME             VARCHAR,
+    AMOUNT                    NUMBER(18, 2),
+    ORDER_DATE                DATE,
+    AUDIT__INGEST_TIMESTAMP   TIMESTAMP_NTZ(9),
+    AUDIT__UPDATE_TIMESTAMP  TIMESTAMP_NTZ(9) NOT NULL,
+    AUDIT__DELETE_FLG         BOOLEAN DEFAULT FALSE
+);
+
+-- アンロード先のSTAGEとチェックポイント管理を行うSTAGEを作成
+CREATE OR REPLACE STAGE ORDERS_CDC_STAGE;
+CREATE OR REPLACE STAGE CHECKPOINT_STAGE
+    FILE_FORMAT = (TYPE = JSON COMPRESSION = NONE);
+
+-- 出力した Parquet のデータを参照するために必要でありストアドプロシージャでは不使用
+CREATE OR REPLACE FILE FORMAT PARQUET_READ_FORMAT
+    TYPE = PARQUET
+    USE_LOGICAL_TYPE = TRUE;
+
+-- test 用テーブルにデータをinsert
+INSERT INTO ORDERS (
+    ORDER_ID,
+    CUSTOMER_NAME,
+    AMOUNT,
+    ORDER_DATE,
+    AUDIT__INGEST_TIMESTAMP,
+    AUDIT__UPDATE_TIMESTAMP,
+    AUDIT__DELETE_FLG
+)
+VALUES
+    (1, 'Alice', 100.50, '2026-10-01', '2026-10-04 17:00:00', '2026-10-04 17:00:00', FALSE),
+    (2, 'Bob',   200.00, '2026-10-02', '2026-10-04 17:00:00', '2026-10-04 17:00:00', FALSE),
+    (3, 'Carol', 300.00, '2026-10-03', '2026-10-04 17:00:00', '2026-10-04 17:00:00', FALSE);
+
+
+-- プロシージャの実行
+CALL DCM_TEST01_DEV.PROCEDURES.SP_UNLOAD_QUERY_BASED_CDC_V1(
+    P_SOURCE_QUERY => $$
+        SELECT
+            ORDER_ID,
+            CUSTOMER_NAME,
+            AMOUNT,
+            ORDER_DATE,
+            AUDIT__INGEST_TIMESTAMP,
+            AUDIT__UPDATE_TIMESTAMP,
+            AUDIT__DELETE_FLG
+        FROM DCM_TEST01_DEV.TEST_SCHEMA.ORDERS
+    $$,
+    P_TARGET_STAGE     => 'DCM_TEST01_DEV.TEST_SCHEMA.ORDERS_CDC_STAGE',
+    P_CHECKPOINT_STAGE => 'DCM_TEST01_DEV.TEST_SCHEMA.CHECKPOINT_STAGE',
+    P_TARGET_PATH      => 'output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS',
+    P_CHECKPOINT_PATH  => 'checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS',
+    P_TIMESTAMP_COLUMN => 'AUDIT__UPDATE_TIMESTAMP',
+    P_LOOKBACK_SECONDS => 0
+);
+
+-- 結果確認
+-- アンロードしたデータを確認
+LIST @ORDERS_CDC_STAGE/output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS;
+
+SELECT
+    T.$1:ORDER_ID::NUMBER AS ORDER_ID,
+    T.$1:CUSTOMER_NAME::VARCHAR AS CUSTOMER_NAME,
+    T.$1:AMOUNT::NUMBER(18, 2) AS AMOUNT,
+    T.$1:AUDIT__UPDATE_TIMESTAMP::TIMESTAMP_NTZ AS AUDIT__UPDATE_TIMESTAMP,
+    T.$1:AUDIT__DELETE_FLG::BOOLEAN AS AUDIT__DELETE_FLG
+FROM @ORDERS_CDC_STAGE/output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS/
+    (FILE_FORMAT => 'PARQUET_READ_FORMAT', PATTERN => '.*[.]parquet$') AS T
+ORDER BY ORDER_ID;
+
+-- チェックポイントファイルの確認
+LIST @checkpoint_stage/checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS;
+
+SELECT
+    $1:completed_at_utc::VARCHAR   AS completed_at_utc,
+    $1:lookback_seconds::NUMBER    AS lookback_seconds,
+    $1:output_location::VARCHAR    AS output_location,
+    $1:previous_timestamp::VARCHAR AS previous_timestamp,
+    $1:schema_version::NUMBER      AS schema_version,
+    $1:source_query::VARCHAR       AS source_query,
+    $1:unloaded_rows::NUMBER        AS unloaded_rows,
+    $1:wartermark_column::VARCHAR  AS wartermark_column,
+    $1:wartermark_value::VARCHAR   AS wartermark_value
+FROM @checkpoint_stage/checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS/;
+
+-- テストテーブルにupsert の実施
+MERGE INTO ORDERS AS T
+USING (
+    SELECT
+        COLUMN1::NUMBER AS ORDER_ID,
+        COLUMN2::VARCHAR AS CUSTOMER_NAME,
+        COLUMN3::NUMBER(18, 2) AS AMOUNT,
+        COLUMN4::DATE AS ORDER_DATE,
+        COLUMN5::TIMESTAMP_NTZ(9) AS CHANGE_TIMESTAMP
+    FROM VALUES
+        (2, 'Bob Updated', 250.00, '2026-10-02', '2026-10-04 17:10:00'),
+        (4, 'Dave',        400.00, '2026-10-04', '2026-10-04 17:10:00')
+) AS S
+ON T.ORDER_ID = S.ORDER_ID
+WHEN MATCHED THEN
+    UPDATE SET
+        T.CUSTOMER_NAME = S.CUSTOMER_NAME,
+        T.AMOUNT = S.AMOUNT,
+        T.ORDER_DATE = S.ORDER_DATE,
+        T.AUDIT__UPDATE_TIMESTAMP = S.CHANGE_TIMESTAMP,
+        T.AUDIT__DELETE_FLG = FALSE
+WHEN NOT MATCHED THEN
+    INSERT (
+        ORDER_ID, CUSTOMER_NAME,
+        AMOUNT,
+        ORDER_DATE,
+        AUDIT__INGEST_TIMESTAMP,
+        AUDIT__UPDATE_TIMESTAMP,
+        AUDIT__DELETE_FLG
+    )
+    VALUES (
+        S.ORDER_ID,
+        S.CUSTOMER_NAME,
+        S.AMOUNT,
+        S.ORDER_DATE,
+        S.CHANGE_TIMESTAMP,
+        S.CHANGE_TIMESTAMP, FALSE
+    );
+
+-- プロシージャの実行
+CALL DCM_TEST01_DEV.PROCEDURES.SP_UNLOAD_QUERY_BASED_CDC_V1(
+    P_SOURCE_QUERY => $$
+        SELECT
+            ORDER_ID,
+            CUSTOMER_NAME,
+            AMOUNT,
+            ORDER_DATE,
+            AUDIT__INGEST_TIMESTAMP,
+            AUDIT__UPDATE_TIMESTAMP,
+            AUDIT__DELETE_FLG
+        FROM DCM_TEST01_DEV.TEST_SCHEMA.ORDERS
+    $$,
+    P_TARGET_STAGE     => 'DCM_TEST01_DEV.TEST_SCHEMA.ORDERS_CDC_STAGE',
+    P_CHECKPOINT_STAGE => 'DCM_TEST01_DEV.TEST_SCHEMA.CHECKPOINT_STAGE',
+    P_TARGET_PATH      => 'output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS',
+    P_CHECKPOINT_PATH  => 'checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS',
+    P_TIMESTAMP_COLUMN => 'AUDIT__UPDATE_TIMESTAMP',
+    P_LOOKBACK_SECONDS => 0
+);
+
+-- 結果確認
+-- アンロードしたデータを確認
+LIST @ORDERS_CDC_STAGE/output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS;
+
+SELECT * FROM DCM_TEST01_DEV.TEST_SCHEMA.ORDERS;
+
+SELECT
+    T.$1:ORDER_ID::NUMBER AS ORDER_ID,
+    T.$1:CUSTOMER_NAME::VARCHAR AS CUSTOMER_NAME,
+    T.$1:AMOUNT::NUMBER(18, 2) AS AMOUNT,
+    T.$1:AUDIT__UPDATE_TIMESTAMP::TIMESTAMP_NTZ AS AUDIT__UPDATE_TIMESTAMP
+FROM @ORDERS_CDC_STAGE/output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS/
+    (FILE_FORMAT => 'PARQUET_READ_FORMAT', PATTERN => '.*[.]parquet$') AS T
+WHERE T.$1:AUDIT__UPDATE_TIMESTAMP::TIMESTAMP_NTZ
+    = '2026-10-04 17:10:00'::TIMESTAMP_NTZ
+ORDER BY ORDER_ID;
+
+-- チェックポイントファイルの確認
+LIST @checkpoint_stage/checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS/;
+
+SELECT
+    $1:completed_at_utc::VARCHAR   AS completed_at_utc,
+    $1:lookback_seconds::NUMBER    AS lookback_seconds,
+    $1:schema_version::NUMBER      AS schema_version,
+    $1:source_query::VARCHAR       AS source_query,
+    $1:unloaded_rows::NUMBER        AS unloaded_rows,
+    $1:wartermark_column::VARCHAR  AS wartermark_column,
+    $1:wartermark_value::VARCHAR   AS wartermark_value
+FROM @checkpoint_stage/checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS/;
+
+-- DELETE時の動作確認
+DELETE FROM ORDERS WHERE ORDER_ID = 1;
+
+CALL SP_UNLOAD_QUERY_BASED_CDC(
+    P_SOURCE_QUERY => $$
+        SELECT
+            ORDER_ID,
+            CUSTOMER_NAME,
+            AMOUNT,
+            ORDER_DATE,
+            AUDIT__INGEST_TIMESTAMP,
+            AUDIT__UPDATE_TIMESTAMP,
+            AUDIT__DELETE_FLG
+        FROM DCM_TEST01_DEV.TEST_SCHEMA.ORDERS
+    $$,
+    P_TARGET_STAGE     => 'DCM_TEST01_DEV.TEST_SCHEMA.ORDERS_CDC_STAGE',
+    P_CHECKPOINT_STAGE => 'DCM_TEST01_DEV.TEST_SCHEMA.CHECKPOINT_STAGE',
+    P_TARGET_PATH      => 'output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS',
+    P_CHECKPOINT_PATH  => 'checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS',
+    P_TIMESTAMP_COLUMN => 'AUDIT__UPDATE_TIMESTAMP',
+    P_LOOKBACK_SECONDS => 0
+);
+
+-- UPDATE時の動作確認
+UPDATE ORDERS
+SET
+    AUDIT__DELETE_FLG = TRUE,
+    AUDIT__UPDATE_TIMESTAMP = '2026-10-04 17:20:00'::TIMESTAMP_NTZ
+WHERE ORDER_ID = 3;
+
+CALL DCM_TEST01_DEV.PROCEDURES.SP_UNLOAD_QUERY_BASED_CDC_V1(
+    P_SOURCE_QUERY => $$
+        SELECT
+            ORDER_ID,
+            CUSTOMER_NAME,
+            AMOUNT,
+            ORDER_DATE,
+            AUDIT__INGEST_TIMESTAMP,
+            AUDIT__UPDATE_TIMESTAMP,
+            AUDIT__DELETE_FLG
+        FROM DCM_TEST01_DEV.TEST_SCHEMA.ORDERS
+    $$,
+    P_TARGET_STAGE     => 'DCM_TEST01_DEV.TEST_SCHEMA.ORDERS_CDC_STAGE',
+    P_CHECKPOINT_STAGE => 'DCM_TEST01_DEV.TEST_SCHEMA.CHECKPOINT_STAGE',
+    P_TARGET_PATH      => 'output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS',
+    P_CHECKPOINT_PATH  => 'checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS',
+    P_TIMESTAMP_COLUMN => 'AUDIT__UPDATE_TIMESTAMP',
+    P_LOOKBACK_SECONDS => 0
+);
+
+-- アンロードしたデータを確認
+LIST @ORDERS_CDC_STAGE/output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS/;
+
+SELECT
+    T.$1:ORDER_ID::NUMBER AS ORDER_ID,
+    T.$1:AUDIT__DELETE_FLG::BOOLEAN AS AUDIT__DELETE_FLG,
+    T.$1:AUDIT__UPDATE_TIMESTAMP::TIMESTAMP_NTZ AS AUDIT__UPDATE_TIMESTAMP
+FROM @ORDERS_CDC_STAGE/output/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS/
+    (FILE_FORMAT => 'PARQUET_READ_FORMAT', PATTERN => '.*[.]parquet$') AS T
+WHERE T.$1:AUDIT__UPDATE_TIMESTAMP::TIMESTAMP_NTZ
+    = '2026-10-04 17:20:00'::TIMESTAMP_NTZ;
+
+-- チェックポイントファイルの確認
+LIST @checkpoint_stage/checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS;
+
+SELECT
+    $1:completed_at_utc::VARCHAR   AS completed_at_utc,
+    $1:lookback_seconds::NUMBER    AS lookback_seconds,
+    $1:output_location::VARCHAR    AS output_location,
+    $1:previous_timestamp::VARCHAR AS previous_timestamp,
+    $1:schema_version::NUMBER      AS schema_version,
+    $1:source_query::VARCHAR       AS source_query,
+    $1:unloaded_rows::NUMBER        AS unloaded_rows,
+    $1:wartermark_column::VARCHAR  AS wartermark_column,
+    $1:wartermark_value::VARCHAR   AS wartermark_value
+FROM @checkpoint_stage/checkpoints/DCM_TEST01_DEV.TEST_SCHEMA.ORDERS/;
+
+
+-- テストテーブルの削除
+/*
+DROP TABLE DCM_TEST01_DEV.TEST_SCHEMA.ORDERS;
+*/
+
+/*
+DROP SCHEMA DCM_TEST01_DEV.TEST_SCHEMA;
+*/

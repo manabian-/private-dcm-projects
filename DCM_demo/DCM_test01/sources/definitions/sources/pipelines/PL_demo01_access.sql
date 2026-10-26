@@ -60,3 +60,10 @@ TO ROLE ETL_TASK_ROLE;
 GRANT USAGE
 ON STAGE {{ object_namespace }}.OUTPUT_STAGE
 TO ROLE ETL_TASK_ROLE;
+
+--------------------------------------------------
+-- databricks trriger Stage
+--------------------------------------------------
+GRANT USAGE
+ON STAGE {{ object_namespace }}.JOB_TRIGGER_STAGE
+TO ROLE ETL_TASK_ROLE;

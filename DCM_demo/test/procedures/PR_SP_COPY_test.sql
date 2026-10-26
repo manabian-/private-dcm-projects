@@ -1,7 +1,9 @@
--- PR_copy_into_v1.sqlの単体テスト
+-- PR_copy_into_v1.sqlのテスト
 
 USE ROLE ETL_TASK_ROLE;
 USE WAREHOUSE DCM_DEMO_WH;
+
+-- ファイルをストレージアカウントに配置してからプロシージャをCALLする
 
 CALL DCM_TEST01_DEV.PROCEDURES.SP_COPY_v1(
     P_TARGET_TABLE => 'DCM_TEST01_DEV.PL_DEMO01.ORDERS_BRONZE',

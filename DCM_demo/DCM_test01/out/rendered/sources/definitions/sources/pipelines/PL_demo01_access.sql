@@ -60,3 +60,10 @@ TO ROLE ETL_TASK_ROLE;
 GRANT USAGE
 ON STAGE DCM_TEST01_DEV.PL_DEMO01.OUTPUT_STAGE
 TO ROLE ETL_TASK_ROLE;
+
+--------------------------------------------------
+-- databricks trriger Stage
+--------------------------------------------------
+GRANT USAGE
+ON STAGE DCM_TEST01_DEV.PL_DEMO01.JOB_TRIGGER_STAGE
+TO ROLE ETL_TASK_ROLE;

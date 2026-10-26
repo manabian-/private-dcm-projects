@@ -13,6 +13,7 @@
 {% set merge_orders_task = object_namespace ~ '.TASK_MERGE_ORDERS' %}
 {% set cleanup_orders_bronze_task = object_namespace ~ '.TASK_CLEANUP_ORDERS_BRONZE' %}
 {% set unload_orders_cdc_task = object_namespace ~ '.TASK_UNLOAD_ORDERS_CDC' %}
+{% set databricks_trigger_task = object_namespace ~ '.TASK_PUT_DATABRICKS_TRIGGER' %}
 
 {# bronze tableの削除期間 #}
 {% set retention_days = 60 %}
@@ -32,7 +33,12 @@ DEFINE STAGE {{ database }}.{{ app_schema }}.SOURCE_STAGE
 DEFINE STAGE {{ database }}.{{ app_schema }}.OUTPUT_STAGE
     URL = 'azure://adlszealast01.blob.core.windows.net/snowpipe-test/inbound/PL_demo01'
     STORAGE_INTEGRATION = SI_INBOUND;
-    
+
+-- databricks 起動用ファイル出力先ADLSパス
+DEFINE STAGE {{ database }}.{{ app_schema }}.JOB_TRIGGER_STAGE
+    URL = 'azure://adlszealast01.blob.core.windows.net/snowpipe-test/inbound/databricks-trigger/'
+    STORAGE_INTEGRATION = SI_INBOUND;
+
 -- Bronze: 原文の文字列を保持し、COPY のメタデータを監査列に記録する。
 DEFINE TABLE {{ orders_bronze_table }} (
     ORDER_ID VARCHAR,
@@ -72,7 +78,7 @@ DECLARE
     copy_result VARCHAR;
     check_result VARCHAR;
 BEGIN
-    CALL {{ database }}.PROCEDURES.SP_COPY(
+    CALL {{ database }}.PROCEDURES.SP_COPY_v1(
         P_TARGET_TABLE => '{{ orders_bronze_table }}',
         -- ファイル移動を行わないのでsource stageを読み取る
         P_SOURCE_STAGE => '{{ database }}.{{ app_schema }}.SOURCE_STAGE',
@@ -96,7 +102,7 @@ BEGIN
     CALL SYSTEM$SET_RETURN_VALUE(:copy_result);
 
     -- ファイル単位の失敗と COPY SQL 自体の失敗のどちらも後続を停止する。
-    CALL {{ database }}.PROCEDURES.SP_CHECK_COPY_RESULT(
+    CALL {{ database }}.PROCEDURES.SP_CHECK_COPY_RESULT_v1(
         :copy_result, TRUE, TRUE
     ) INTO :check_result;
 
@@ -112,7 +118,7 @@ DECLARE
     merge_result VARIANT;
     return_value VARCHAR;
 BEGIN
-    CALL {{ database }}.PROCEDURES.SP_UPSERT_BRONZE_TO_SILVER(
+    CALL {{ database }}.PROCEDURES.SP_UPSERT_BRONZE_TO_SILVER_v1(
         P_TARGET_TABLE => '{{ orders_silver_table }}',
         P_SOURCE_SQL => $$
             SELECT
@@ -144,7 +150,7 @@ DECLARE
 BEGIN
     -- Silver の MERGE が成功した後に Bronze だけを削除する。
     IF ({{ retention_days }} > 0) THEN
-        CALL {{ database }}.PROCEDURES.SP_DELETE_OLD_ORDERS(
+        CALL {{ database }}.PROCEDURES.SP_DELETE_OLD_ORDERS_v1(
             P_TARGET_TABLE => '{{ orders_bronze_table }}',
             RETENTION_DAYS => {{ retention_days }}
         ) INTO :delete_result;
@@ -163,7 +169,7 @@ AS
 DECLARE
     unload_query_id VARCHAR;
 BEGIN
-    CALL {{ database }}.PROCEDURES.SP_UNLOAD_FROM_STREAM(
+    CALL {{ database }}.PROCEDURES.SP_UNLOAD_v1(
         P_TARGET_STAGE => '{{ database }}.{{ app_schema }}.OUTPUT_STAGE',
         P_TARGET_PATH => 'output/',
         P_SOURCE_QUERY => $$
@@ -193,5 +199,27 @@ BEGIN
         P_DETAILED_OUTPUT => TRUE
     ) INTO :unload_query_id;
 
-    CALL SYSTEM$SET_RETURN_VALUE(:unload_query_id);
+    CALL SYSTEM$SET_RETURN_VALUE(:unload_query_id);    
+END;
+
+DEFINE TASK {{ databricks_trigger_task }}
+    WAREHOUSE = '{{ warehouse }}'
+    TIMEZONE = 'UTC', AUTOCOMMIT = TRUE
+    AFTER {{ unload_orders_cdc_task }}
+    STARTED
+AS
+DECLARE
+    trigger_result VARIANT;
+    return_value VARCHAR;
+BEGIN
+
+    CALL {{ database }}.PROCEDURES.SP_PUT_DATABRICKS_TRIGGER_V1(
+        P_TARGET_STAGE => '{{ database }}.{{ app_schema }}.JOB_TRIGGER_STAGE',
+        P_TARGET_PATH  => 'job_a'
+    ) INTO :trigger_result;
+
+    return_value := TO_JSON(:trigger_result);
+
+    CALL SYSTEM$SET_RETURN_VALUE(:return_value);
+
 END;
